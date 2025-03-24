@@ -195,20 +195,35 @@ func (t *BPlusTree) Get(key []byte) ([]byte, bool) {
 	// Find the leaf node that should contain the key
 	node := t.root
 	for !node.isLeaf {
-		i := 0
-		for i < len(node.keys) && bytes.Compare(key, node.keys[i]) >= 0 {
-			i++
+		left, right := 0, len(node.keys)-1
+		// Binary search to find the child to follow
+		for left <= right {
+			mid := left + (right-left)/2
+			cmp := bytes.Compare(key, node.keys[mid])
+			if cmp < 0 {
+				right = mid - 1
+			} else {
+				left = mid + 1
+			}
 		}
-		node = node.children[i]
+		// Follow the child at the position found
+		node = node.children[left]
 	}
 
-	// Search in leaf node for the exact key match
-	for i, k := range node.keys {
-		if bytes.Equal(k, key) {
-			return node.values[i], true
+	// Use binary search to find the key in the leaf node
+	left, right := 0, len(node.keys)-1
+	for left <= right {
+		mid := left + (right-left)/2
+		cmp := bytes.Compare(node.keys[mid], key)
+		if cmp == 0 {
+			return node.values[mid], true // Key found
+		} else if cmp < 0 {
+			left = mid + 1 // Search in the right half
+		} else {
+			right = mid - 1 // Search in the left half
 		}
 	}
-	return nil, false
+	return nil, false // Key not found
 }
 
 // Delete removes a key-value pair from the tree
