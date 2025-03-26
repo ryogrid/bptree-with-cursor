@@ -3,8 +3,10 @@ package bltree
 import (
 	"bytes"
 	"fmt"
+	"math/rand"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestBasicOperations(t *testing.T) {
@@ -495,5 +497,427 @@ func TestMixedOperations(t *testing.T) {
 			t.Errorf("Final verification: incorrect value for key %s: got %s, want %s",
 				key, string(value), expectedValue)
 		}
+	}
+}
+
+// Benchmark configuration
+const (
+	totalOperations    = 100000 // Total number of operations
+	preloadedKeysCount = 500000 // Number of keys to preload before benchmarking
+	insertRatio        = 0.1    // Ratio of insert operations
+	getRatio           = 0.8    // Ratio of get operations
+	deleteRatio        = 0.1    // Ratio of delete operations
+	keySize            = 8      // Key size in bytes
+	valueSize          = 8      // Value size in bytes
+	treeOrder          = 16     // Tree order
+)
+
+// Number of goroutines to measure
+var goroutineCounts = []int{1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 24, 32}
+
+// BenchmarkConcurrentAccess measures performance of parallel access
+func BenchmarkConcurrentAccess(b *testing.B) {
+	// Reset timer to run only once
+	b.ResetTimer()
+	b.StopTimer()
+
+	for _, numGoroutines := range goroutineCounts {
+		// Run multiple times for each thread count to calculate average
+		b.Run(fmt.Sprintf("Goroutines-%d", numGoroutines), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				// Create a new tree
+				tree := NewBLinkTree(treeOrder)
+
+				// Calculate operations per goroutine
+				opsPerGoroutine := totalOperations / numGoroutines
+
+				// Start measurement
+				start := time.Now()
+
+				var wg sync.WaitGroup
+				wg.Add(numGoroutines)
+
+				// Launch each goroutine
+				for g := 0; g < numGoroutines; g++ {
+					go func(id int) {
+						defer wg.Done()
+
+						// Distribute key ranges (each goroutine works on different key range)
+						keyPrefix := fmt.Sprintf("g%d-", id)
+
+						// Calculate number of operations by type
+						insertOps := int(float64(opsPerGoroutine) * insertRatio)
+						getOps := int(float64(opsPerGoroutine) * getRatio)
+						deleteOps := int(float64(opsPerGoroutine) * deleteRatio)
+
+						// Insert operations
+						for i := 0; i < insertOps; i++ {
+							key := []byte(fmt.Sprintf("%skey%06d", keyPrefix, i))
+							value := make([]byte, valueSize)
+							// Fill with dummy data
+							for j := 0; j < valueSize; j++ {
+								value[j] = byte((i + j) % 256)
+							}
+							tree.Insert(key, value)
+						}
+
+						// Get operations
+						for i := 0; i < getOps; i++ {
+							// Select a key from previously inserted keys
+							idx := i % insertOps
+							key := []byte(fmt.Sprintf("%skey%06d", keyPrefix, idx))
+							_, _ = tree.Get(key)
+						}
+
+						// Delete operations
+						for i := 0; i < deleteOps; i++ {
+							// Select a key from previously inserted keys
+							idx := i % insertOps
+							key := []byte(fmt.Sprintf("%skey%06d", keyPrefix, idx))
+							_ = tree.Delete(key)
+						}
+					}(g)
+				}
+
+				// Wait for all goroutines to complete
+				wg.Wait()
+
+				// End measurement
+				elapsed := time.Since(start)
+
+				// Display results
+				opsPerSecond := float64(totalOperations) / elapsed.Seconds()
+				b.ReportMetric(opsPerSecond, "ops/sec")
+				b.ReportMetric(float64(elapsed)/float64(time.Millisecond), "ms/op")
+			}
+		})
+	}
+}
+
+// Benchmarks for specific workloads
+
+// BenchmarkInsertOnly measures insert-only performance
+func BenchmarkInsertOnly(b *testing.B) {
+	benchmarkSpecificWorkload(b, 1.0, 0, 0)
+}
+
+// BenchmarkGetOnly measures get-only performance
+func BenchmarkGetOnly(b *testing.B) {
+	// Preload: Insert data into the tree
+	tree := NewBLinkTree(treeOrder)
+	for i := 0; i < totalOperations; i++ {
+		key := []byte(fmt.Sprintf("preload-key%06d", i))
+		value := make([]byte, valueSize)
+		tree.Insert(key, value)
+	}
+
+	benchmarkSpecificWorkload(b, 0, 1.0, 0, tree)
+}
+
+// BenchmarkMixedWorkload measures performance with mixed operations
+func BenchmarkMixedWorkload(b *testing.B) {
+	benchmarkSpecificWorkload(b, insertRatio, getRatio, deleteRatio)
+}
+
+// Helper function to run benchmarks with specific workload profiles
+func benchmarkSpecificWorkload(b *testing.B, insRatio, getRatio, delRatio float64, preloadedTree ...*BLinkTree) {
+	b.ResetTimer()
+	b.StopTimer()
+
+	for _, numGoroutines := range goroutineCounts {
+		b.Run(fmt.Sprintf("Goroutines-%d", numGoroutines), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				// Prepare tree
+				var tree *BLinkTree
+				if len(preloadedTree) > 0 {
+					tree = preloadedTree[0]
+				} else {
+					tree = NewBLinkTree(treeOrder)
+				}
+
+				opsPerGoroutine := totalOperations / numGoroutines
+
+				start := time.Now()
+
+				var wg sync.WaitGroup
+				wg.Add(numGoroutines)
+
+				for g := 0; g < numGoroutines; g++ {
+					go func(id int) {
+						defer wg.Done()
+
+						keyPrefix := fmt.Sprintf("g%d-", id)
+
+						insertOps := int(float64(opsPerGoroutine) * insRatio)
+						getOps := int(float64(opsPerGoroutine) * getRatio)
+						deleteOps := int(float64(opsPerGoroutine) * delRatio)
+
+						// Execute operations
+						insertedKeys := make([]string, 0, insertOps)
+
+						// Insert
+						for i := 0; i < insertOps; i++ {
+							key := fmt.Sprintf("%skey%06d", keyPrefix, i)
+							insertedKeys = append(insertedKeys, key)
+							value := make([]byte, valueSize)
+							for j := 0; j < valueSize; j++ {
+								value[j] = byte((i + j) % 256)
+							}
+							tree.Insert([]byte(key), value)
+						}
+
+						// Get
+						for i := 0; i < getOps; i++ {
+							var key string
+							if len(insertedKeys) > 0 {
+								// Get from inserted keys
+								key = insertedKeys[i%len(insertedKeys)]
+							} else if len(preloadedTree) > 0 {
+								// Get from preloaded tree
+								key = fmt.Sprintf("preload-key%06d", (id*opsPerGoroutine+i)%totalOperations)
+							} else {
+								continue
+							}
+							_, _ = tree.Get([]byte(key))
+						}
+
+						// Delete
+						for i := 0; i < deleteOps; i++ {
+							if len(insertedKeys) == 0 {
+								continue
+							}
+							key := insertedKeys[i%len(insertedKeys)]
+							_ = tree.Delete([]byte(key))
+						}
+					}(g)
+				}
+
+				wg.Wait()
+
+				elapsed := time.Since(start)
+
+				// Results
+				opsPerSecond := float64(totalOperations) / elapsed.Seconds()
+				b.ReportMetric(opsPerSecond, "ops/sec")
+				b.ReportMetric(float64(elapsed)/float64(time.Millisecond), "ms/op")
+			}
+		})
+	}
+}
+
+// BenchmarkScalability evaluates the scalability of the tree
+func BenchmarkScalability(b *testing.B) {
+	// Measure baseline performance with 1 thread
+	baseTree := NewBLinkTree(treeOrder)
+	singleThreadStart := time.Now()
+
+	// Single-thread operations
+	insertOps := int(float64(totalOperations) * insertRatio)
+	getOps := int(float64(totalOperations) * getRatio)
+	deleteOps := int(float64(totalOperations) * deleteRatio)
+
+	// Insert
+	for i := 0; i < insertOps; i++ {
+		key := []byte(fmt.Sprintf("base-key%06d", i))
+		value := make([]byte, valueSize)
+		baseTree.Insert(key, value)
+	}
+
+	// Get
+	for i := 0; i < getOps; i++ {
+		key := []byte(fmt.Sprintf("base-key%06d", i%insertOps))
+		_, _ = baseTree.Get(key)
+	}
+
+	// Delete
+	for i := 0; i < deleteOps; i++ {
+		key := []byte(fmt.Sprintf("base-key%06d", i%insertOps))
+		_ = baseTree.Delete(key)
+	}
+
+	singleThreadTime := time.Since(singleThreadStart)
+
+	// Measure multi-thread performance and evaluate scalability
+	for _, numGoroutines := range goroutineCounts {
+		if numGoroutines == 1 {
+			continue // Already measured single-thread
+		}
+
+		b.Run(fmt.Sprintf("ScaleFactor-%d", numGoroutines), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				tree := NewBLinkTree(treeOrder)
+				opsPerGoroutine := totalOperations / numGoroutines
+
+				start := time.Now()
+
+				var wg sync.WaitGroup
+				wg.Add(numGoroutines)
+
+				for g := 0; g < numGoroutines; g++ {
+					go func(id int) {
+						defer wg.Done()
+
+						keyPrefix := fmt.Sprintf("g%d-", id)
+
+						insertOps := int(float64(opsPerGoroutine) * insertRatio)
+						getOps := int(float64(opsPerGoroutine) * getRatio)
+						deleteOps := int(float64(opsPerGoroutine) * deleteRatio)
+
+						// Execute operations
+						for i := 0; i < insertOps; i++ {
+							key := []byte(fmt.Sprintf("%skey%06d", keyPrefix, i))
+							value := make([]byte, valueSize)
+							tree.Insert(key, value)
+						}
+
+						for i := 0; i < getOps; i++ {
+							key := []byte(fmt.Sprintf("%skey%06d", keyPrefix, i%insertOps))
+							_, _ = tree.Get(key)
+						}
+
+						for i := 0; i < deleteOps; i++ {
+							key := []byte(fmt.Sprintf("%skey%06d", keyPrefix, i%insertOps))
+							_ = tree.Delete(key)
+						}
+					}(g)
+				}
+
+				wg.Wait()
+
+				multiThreadTime := time.Since(start)
+
+				// Calculate scalability factor (ideally close to numGoroutines)
+				scaleFactor := singleThreadTime.Seconds() / (multiThreadTime.Seconds() * float64(numGoroutines))
+				// 100% is ideal scalability
+				scalePercent := scaleFactor * 100
+
+				b.ReportMetric(scalePercent, "%scale")
+				b.ReportMetric(float64(multiThreadTime)/float64(time.Millisecond), "ms/op")
+			}
+		})
+	}
+}
+
+// BenchmarkRandomMixedAccess measures performance of concurrent random operations on a shared key space
+func BenchmarkRandomMixedAccess(b *testing.B) {
+	b.ResetTimer()
+	b.StopTimer()
+
+	// Store the baseline performance for scaling calculations
+	var baselineOpsPerSecond float64
+	//var baselineTimeMs float64
+
+	for _, numGoroutines := range goroutineCounts {
+		b.Run(fmt.Sprintf("Goroutines-%d", numGoroutines), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				// Create and preload the tree
+				tree := NewBLinkTree(treeOrder)
+
+				// Preload with data
+				for j := 0; j < preloadedKeysCount; j++ {
+					key := []byte(fmt.Sprintf("key%010d", j))
+					value := make([]byte, valueSize)
+					// Fill with deterministic data
+					for k := 0; k < valueSize; k++ {
+						value[k] = byte((j + k) % 256)
+					}
+					tree.Insert(key, value)
+				}
+
+				// Calculate operations per goroutine
+				opsPerGoroutine := totalOperations / numGoroutines
+
+				// Pre-calculate operation counts
+				insertOpsTotal := int(float64(totalOperations) * insertRatio)
+				getOpsTotal := int(float64(totalOperations) * getRatio)
+				deleteOpsTotal := int(float64(totalOperations) * deleteRatio)
+
+				start := time.Now()
+
+				var wg sync.WaitGroup
+				wg.Add(numGoroutines)
+
+				// Initialize random number generators for each goroutine
+				rngs := make([]*rand.Rand, numGoroutines)
+				for g := 0; g < numGoroutines; g++ {
+					rngs[g] = rand.New(rand.NewSource(int64(g) + time.Now().UnixNano()))
+				}
+
+				// Launch goroutines
+				for g := 0; g < numGoroutines; g++ {
+					go func(id int, rng *rand.Rand) {
+						defer wg.Done()
+
+						// Local operation counters
+						localInsert := 0
+						localGet := 0
+						localDelete := 0
+
+						// Try to perform balanced operations
+						for j := 0; j < opsPerGoroutine; j++ {
+							// Choose operation randomly but try to maintain ratio
+							opType := rng.Intn(10)
+
+							if opType < int(insertRatio*10) && localInsert < insertOpsTotal/numGoroutines {
+								// Insert operation
+								// Generate a random key in the shared key space
+								keyNum := rng.Intn(preloadedKeysCount * 2) // Expand key space
+								key := []byte(fmt.Sprintf("key%010d", keyNum))
+								value := make([]byte, valueSize)
+								for k := 0; k < valueSize; k++ {
+									value[k] = byte((keyNum + k) % 256)
+								}
+								tree.Insert(key, value)
+								localInsert++
+
+							} else if opType < int((insertRatio+getRatio)*10) && localGet < getOpsTotal/numGoroutines {
+								// Get operation
+								keyNum := rng.Intn(preloadedKeysCount)
+								key := []byte(fmt.Sprintf("key%010d", keyNum))
+								_, _ = tree.Get(key)
+								localGet++
+
+							} else if localDelete < deleteOpsTotal/numGoroutines {
+								// Delete operation
+								keyNum := rng.Intn(preloadedKeysCount)
+								key := []byte(fmt.Sprintf("key%010d", keyNum))
+								_ = tree.Delete(key)
+								localDelete++
+
+							} else {
+								// Fallback to get if other operations already met their quota
+								keyNum := rng.Intn(preloadedKeysCount)
+								key := []byte(fmt.Sprintf("key%010d", keyNum))
+								_, _ = tree.Get(key)
+								localGet++
+							}
+						}
+					}(g, rngs[g])
+				}
+
+				wg.Wait()
+
+				elapsed := time.Since(start)
+
+				// Calculate performance metrics
+				opsPerSecond := float64(totalOperations) / elapsed.Seconds()
+				timeMs := float64(elapsed) / float64(time.Millisecond)
+
+				// For the first thread count (1), store baseline performance
+				if numGoroutines == 1 {
+					baselineOpsPerSecond = opsPerSecond
+					//baselineTimeMs = timeMs
+					b.ReportMetric(100.0, "%speedup") // 100% baseline
+				} else {
+					// Calculate speedup percentage compared to single thread
+					speedupPercent := (opsPerSecond / baselineOpsPerSecond) * 100
+					b.ReportMetric(speedupPercent, "%speedup")
+				}
+
+				// Report standard metrics
+				b.ReportMetric(opsPerSecond, "ops/sec")
+				b.ReportMetric(timeMs, "ms/op")
+			}
+		})
 	}
 }
