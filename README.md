@@ -1,1 +1,1 @@
-# B-+tree wrote with Cursor editor and its coding AI
+# B-+tree (B-link tree) implemented by Cursor editor and its coding AI
